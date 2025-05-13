@@ -1,4 +1,3 @@
-# --- START OF FILE Warehouse-Path-Finder-main/requirements.txt ---
 # GUI Framework
 PySide6>=6.4.0  # Qt6 bindings for Python - used for the application interface
 
@@ -13,5 +12,4 @@ scipy>=1.9.0  # Scientific computing library - used for image dilation in pathfi
 matplotlib>=3.6.0  # Plotting library - used for analysis histograms
 
 # Optional but often used with CSVs (though current direct use might be minimal)
-pandas>=1.5.0  # Data manipulation library - can simplify CSV operations
-# --- END OF FILE Warehouse-Path-Finder-main/requirements.txt ---
+pandas>=1.5.0  # Data manipulation library - can simplify CSV operations 

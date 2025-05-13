@@ -1,5 +1,3 @@
-# --- START OF FILE Warehouse-Path-Finder-main/README.md ---
-
 # Warehouse Path Finder
 
 ## Introduction
@@ -153,4 +151,4 @@ Please adhere to existing code style and add tests for new features.
 
 ## License
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.# PathFinder-Refactored
+This project is licensed under the MIT License. See the `LICENSE` file for details. 
