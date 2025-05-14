@@ -6,7 +6,8 @@
 
 The Warehouse Path Finder is a Python desktop application using the PySide6 (Qt6) framework. It enables warehouse managers and logistics planners to optimize warehouse operations by:
 *   Visualizing warehouse layouts from PDF floor plans.
-*   Defining layout features: obstacles, pick aisles, staging locations, and staging areas with travel penalties.
+*   Defining layout features: obstacles, pick aisles, staging locations, staging areas with travel penalties, **and optional user-defined pathfinding boundaries**.
+*   Calculating optimal (shortest) paths between defined locations using Dijkstra's algorithm **on a potentially cropped grid for efficiency**.
 *   Calculating optimal (shortest) paths between defined locations using Dijkstra's algorithm.
 *   Analyzing picklist efficiency based on travel distances.
 *   Animating warehouse activity over time based on timed picklists.
@@ -16,12 +17,12 @@ The Warehouse Path Finder is a Python desktop application using the PySide6 (Qt6
 The application employs a Model-View-Controller (MVC) pattern enhanced with Service Layers to promote modularity, maintainability, and testability.
 
 *   **Model (`model.py`):**
-    *   `WarehouseModel`: The central data repository holding project state, layout definitions, pathfinding results, and settings.
+    *   `WarehouseModel`: The central data repository holding project state, layout definitions (including **user-defined pathfinding bounds**), pathfinding results (including **grid origin in PDF coordinates**), and settings.
     *   Emits Qt signals upon data changes to notify other components.
     *   Does not contain complex business logic.
 *   **View (`pdf_viewer.py`, Dialogs):**
     *   Presents data to the user and captures input.
-    *   `PdfViewer`: Custom `QGraphicsView` for rendering PDFs, displaying layout elements (obstacles, points, paths), handling drawing interactions (managed by `InteractionMode`), and showing animations.
+    *   `PdfViewer`: Custom `QGraphicsView` for rendering PDFs, displaying layout elements (obstacles, points, paths, **user pathfinding bounds**), handling drawing interactions (managed by `InteractionMode`, now including `DEFINE_PATHFINDING_BOUNDS`), and showing animations.
     *   Dialogs: Provide specialized UIs for tasks like CSV column selection (`PicklistColumnDialog`), analysis results (`AnalysisResultsDialog`), animation control (`AnimationControlDialog`), etc.
 *   **Controller/Presenter (`main.py`):**
     *   `MainWindow`: Orchestrates the application flow.
@@ -32,14 +33,14 @@ The application employs a Model-View-Controller (MVC) pattern enhanced with Serv
     *   Encapsulate domain-specific business logic, operating on the `WarehouseModel`.
     *   May modify the Model or emit signals for progress/completion.
     *   **Key Services:**
-        *   `ProjectService`: Handles project file saving/loading (JSON format).
-        *   `PathfindingService`: Manages grid creation, path precomputation (Dijkstra via `multiprocessing`), path retrieval, and distance calculation.
+        *   `ProjectService`: Handles project file saving/loading (JSON format, now includes **user pathfinding bounds**).
+        *   `PathfindingService`: Manages grid creation (calculating effective bounds, determining grid origin, calling low-level rasterization), path precomputation (Dijkstra via `multiprocessing` on the potentially cropped grid), path retrieval, and distance calculation (accounting for grid origin).
         *   `AnalysisService`: Processes picklist CSVs, calculates distances, generates statistics, and handles results export.
         *   `AnimationService`: Prepares timed picklist data for visualization.
 *   **Core Logic (`pathfinding.py`):**
-    *   Contains low-level pathfinding algorithms (grid generation from obstacles, Dijkstra implementation, path reconstruction) utilized by `PathfindingService`.
+    *   Contains low-level pathfinding algorithms (grid generation from obstacles using a **grid origin** for coordinate transformation, Dijkstra implementation, path reconstruction) utilized by `PathfindingService`.
 *   **Shared Enums (`enums.py`):**
-    *   Defines common enumerations (`InteractionMode`, `PointType`, `AnimationMode`) for clarity and type safety.
+    *   Defines common enumerations (`InteractionMode` - now with `DEFINE_PATHFINDING_BOUNDS`, `PointType`, `AnimationMode`).
 
 **3. High-Level Component Interaction (See `Architecture.txt` for Diagram)**
 
@@ -78,5 +79,5 @@ User actions in the View (`MainWindow`, `PdfViewer`, Dialogs) trigger methods in
 *   `*.py` (Dialogs): Specific UI dialogs.
 *   `requirements.txt`: Dependencies.
 *   `README.md`: Project overview and user guide.
-*   `Architecture.txt`: Detailed architecture description (source for this document).
+*   `Architecture.md`: Detailed architecture description (source for this document).
 *   `Test/`: Directory for unit/integration tests (structure TBD). 

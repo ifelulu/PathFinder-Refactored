@@ -9,6 +9,7 @@ class InteractionMode(Enum):
     SET_SCALE_END = auto()
     DRAW_OBSTACLE = auto()
     DEFINE_STAGING_AREA = auto()
+    DEFINE_PATHFINDING_BOUNDS = auto()
     SET_START_POINT = auto()
     SET_END_POINT = auto()
     DEFINE_AISLE_LINE_START = auto()

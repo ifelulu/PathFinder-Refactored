@@ -75,20 +75,20 @@ The application now more closely follows a **Model-View-Controller (MVC)** patte
 
 ### 4.1 `WarehouseModel` (`model.py`)
     *   **Purpose:** Central data store.
-    *   **Key Data:** PDF path/bounds, scale info, obstacles, staging areas, pick aisles, staging locations, grid parameters, cart dimensions, derived pathfinding grid/maps, validity flags.
-    *   **Key Signals:** `pdf_path_changed`, `scale_changed`, `layout_changed`, `points_changed`, `grid_parameters_changed`, `project_loaded`, `model_reset`, `grid_invalidated`.
+    *   **Key Data:** PDF path/bounds, scale info, obstacles, staging areas, **user-defined pathfinding bounds polygon**, pick aisles, staging locations, grid parameters, cart dimensions, derived pathfinding grid/maps, **grid origin (PDF coordinates)**, validity flags.
+    *   **Key Signals:** `pdf_path_changed`, `scale_changed`, `layout_changed` (now also covers user bounds changes), `points_changed`, `grid_parameters_changed`, `project_loaded`, `model_reset`, `grid_invalidated`.
 
 ### 4.2 `MainWindow` (`main.py`)
     *   **Purpose:** Application entry point, UI orchestration, event handling.
     *   **Responsibilities:**
         *   Initializes `WarehouseModel`, all services, `PdfViewer`, menus, and dialogs.
-        *   Connects UI actions to service calls or model updates.
+        *   Connects UI actions (including defining pathfinding bounds) to service calls or model updates.
         *   Updates UI elements based on signals from model/services.
         *   Manages the overall application lifecycle.
 
 ### 4.3 `PdfViewer` (`pdf_viewer.py`)
     *   **Purpose:** Visual display and interaction with the warehouse layout.
-    *   **Responsibilities:** PDF rendering, drawing tools (scale, obstacles, areas, points), path visualization, animation overlay, mouse/keyboard event handling for interactions. Uses `InteractionMode` enum for state management. Emits signals for user drawing actions.
+    *   **Responsibilities:** PDF rendering, drawing tools (scale, obstacles, areas, **pathfinding bounds**, points), path visualization, animation overlay, mouse/keyboard event handling for interactions. Uses `InteractionMode` enum (now including `DEFINE_PATHFINDING_BOUNDS`). Emits signals for user drawing actions.
 
 ### 4.4 `Dialogs` (various `.py` files)
     *   **Purpose:** Specialized UI for specific tasks.
@@ -97,12 +97,15 @@ The application now more closely follows a **Model-View-Controller (MVC)** patte
 
 ### 4.5 `ProjectService` (`services.py`)
     *   **Purpose:** Manage project file I/O.
-    *   **Methods:** `save_project(model, file_path)`, `load_project(file_path) -> WarehouseModel | None`.
+    *   **Methods:** `save_project(model, file_path)`, `load_project(file_path) -> WarehouseModel | None`. (Internally handles saving/loading `user_pathfinding_bounds`).
     *   **Signals:** `project_load_failed`, `project_save_failed`, `project_operation_finished`.
 
 ### 4.6 `PathfindingService` (`services.py`)
     *   **Purpose:** Core pathfinding logic.
-    *   **Methods:** `update_grid(model)`, `precompute_all_paths(model)`, `get_shortest_path(model, start_name, end_name)`.
+    *   **Methods:**
+        *   `update_grid(model)`: Calculates effective grid bounds (prioritizing user-defined bounds, then layout elements, then full PDF), determines grid origin, and calls `create_grid_from_obstacles`.
+        *   `precompute_all_paths(model)`: Uses the model's grid and origin to map points and run Dijkstra.
+        *   `get_shortest_path(model, start_name, end_name)`: Uses model's grid, origin, and precomputed maps.
     *   **Worker Function:** `_run_dijkstra_worker` for multiprocessing.
     *   **Signals:** `grid_update_started`, `grid_update_finished`, `precomputation_started`, `precomputation_progress`, `precomputation_finished`.
 
@@ -118,12 +121,14 @@ The application now more closely follows a **Model-View-Controller (MVC)** patte
 
 ### 4.9 `pathfinding.py`
     *   **Purpose:** Low-level pathfinding algorithms and grid utility functions.
-    *   **Key Functions:** `create_grid_from_obstacles`, `dijkstra_precompute`, `reconstruct_path`.
-    *   (Largely unchanged by the structural refactoring, but now called by `PathfindingService`).
+    *   **Key Functions:**
+        *   `create_grid_from_obstacles(width, height, obstacles_pdf_list, resolution_factor, grid_origin_pdf, staging_areas_pdf_list, staging_penalty)`: Now accepts `grid_origin_pdf` to correctly transform PDF-coordinate polygons onto the (potentially cropped) grid image.
+        *   `dijkstra_precompute`, `reconstruct_path`.
+    *   (Logic for rasterization updated, e.g., to Grayscale8).
 
 ### 4.10 `enums.py`
     *   **Purpose:** Define shared enumerations for type safety and clarity.
-    *   **Enums:** `InteractionMode`, `PointType`, `AnimationMode`.
+    *   **Enums:** `InteractionMode` (now includes `DEFINE_PATHFINDING_BOUNDS`), `PointType`, `AnimationMode`.
 
 ## 5. Data Flow Examples
 
@@ -141,10 +146,11 @@ The application now more closely follows a **Model-View-Controller (MVC)** patte
 1.  User selects start/end points in `MainWindow` comboboxes and clicks "Calculate Path".
 2.  `MainWindow` slot (Controller) is triggered.
 3.  It calls `pathfinding_service.get_shortest_path(self.model, start_name, end_name)`.
-4.  `PathfindingService` checks if `model.grid_is_valid`. If not, it may call `self.update_grid(model)` first.
-5.  `PathfindingService` uses precomputed data from `model.path_maps` and `model.distance_maps` to reconstruct the path and calculate its physical distance.
-6.  `PathfindingService` returns `(path_points, display_distance)` to `MainWindow`.
-7.  `MainWindow` calls `pdf_viewer.draw_path(path_points)` and updates the status bar with the distance.
+4.  `PathfindingService` checks if `model.path_data_is_valid`. If not (e.g., grid not created or paths not precomputed), it might inform the user or this check might be done in `MainWindow`.
+    *   (Implicitly, if `model.grid_is_valid` is false, `precompute_all_paths` would have been called first, which in turn calls `update_grid` to create the grid based on effective bounds).
+5.  `PathfindingService` uses `model.grid_origin_pdf`, `model.path_maps`, and `model.distance_maps` to map points to the grid, reconstruct the path, and calculate its physical distance.
+6.  `PathfindingService` returns `(path_points_pdf, display_distance)` to `MainWindow`.
+7.  `MainWindow` calls `pdf_viewer.draw_path(path_points_pdf)` and updates the status bar.
 
 ## 6. Key Design Principles Applied
 

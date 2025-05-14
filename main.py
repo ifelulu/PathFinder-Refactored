@@ -5,6 +5,7 @@ import math
 import multiprocessing
 import time # For timing operations if needed
 from typing import List, Dict, Any, Optional, Tuple # Updated typing imports
+import re
 
 # PySide6 imports
 from PySide6.QtWidgets import (
@@ -41,8 +42,22 @@ from analysis_results_dialog import AnalysisResultsDialog
 from animation_picklist_dialog import AnimationPicklistDialog
 from animation_control_dialog import AnimationControlDialog, _get_cluster_from_name
 
-import re
+# Set this to True if you need detailed per-frame logs again temporarily
+DEBUG_ANIMATION_VERBOSE = False
 
+# --- Helper function for natural sorting ---
+def natural_sort_key(s: str) -> list:
+    """
+    Create a sort key for natural string sorting (e.g., A1, A2, A10).
+    Splits the string into alternating sequences of letters and numbers.
+    """
+    if not s: # Handle empty strings
+        return []
+    # Use regex to find sequences of letters or numbers
+    # This will split "A10B2" into ['A', 10, 'B', 2]
+    # It handles cases like "AA10", "A-10", "A10-B2"
+    # The key idea is to convert numeric parts to integers for correct sorting.
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'([0-9]+)', s) if text]
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -68,6 +83,7 @@ class MainWindow(QMainWindow):
 
         # Animation related
         self.animation_timer = QTimer(self)
+        self.animation_timer.setInterval(50) # (50ms = 20 FPS)
         self.animation_control_dialog: Optional[AnimationControlDialog] = None
         self.current_animation_time_s: float = 0.0
         self.animation_speed_multiplier: float = 1.0
@@ -155,6 +171,7 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         self.draw_obstacle_action = QAction("Draw &Obstacle", self); tools_menu.addAction(self.draw_obstacle_action)
         self.define_staging_area_action = QAction("Define Staging &Area", self); tools_menu.addAction(self.define_staging_area_action)
+        self.define_bounds_action = QAction("Define Pathfinding &Bounds", self); tools_menu.addAction(self.define_bounds_action)        
         self.set_start_point_action = QAction("Set Pick &Aisle (Start)", self); tools_menu.addAction(self.set_start_point_action)
         self.set_end_point_action = QAction("Set Staging &Location (End)", self); tools_menu.addAction(self.set_end_point_action)
         tools_menu.addSeparator()
@@ -220,6 +237,7 @@ class MainWindow(QMainWindow):
         self.set_scale_action.triggered.connect(lambda: self.pdf_viewer.set_mode(InteractionMode.SET_SCALE_START))
         self.draw_obstacle_action.triggered.connect(lambda: self.pdf_viewer.set_mode(InteractionMode.DRAW_OBSTACLE))
         self.define_staging_area_action.triggered.connect(lambda: self.pdf_viewer.set_mode(InteractionMode.DEFINE_STAGING_AREA))
+        self.define_bounds_action.triggered.connect(lambda: self.pdf_viewer.set_mode(InteractionMode.DEFINE_PATHFINDING_BOUNDS))        
         self.set_start_point_action.triggered.connect(lambda: self.pdf_viewer.set_mode(InteractionMode.SET_START_POINT))
         self.set_end_point_action.triggered.connect(lambda: self.pdf_viewer.set_mode(InteractionMode.SET_END_POINT))
         self.define_aisle_line_action.triggered.connect(lambda: self.pdf_viewer.set_mode(InteractionMode.DEFINE_AISLE_LINE_START))
@@ -286,6 +304,8 @@ class MainWindow(QMainWindow):
         for name, pos in self.model.pick_aisles.items(): self.pdf_viewer.add_pick_aisle_item(name, pos)
         for name, pos in self.model.staging_locations.items(): self.pdf_viewer.add_staging_location_item(name, pos)
         self.pdf_viewer.clear_path() # Clear any old path if layout changed
+        # --- ADD BOUNDS DRAWING ---
+        self.pdf_viewer.draw_pathfinding_bounds_item(self.model.user_pathfinding_bounds)        
 
     @Slot()
     def _handle_grid_params_changed_in_model(self):
@@ -367,8 +387,12 @@ class MainWindow(QMainWindow):
 
     @Slot(InteractionMode, QPolygonF)
     def _handle_polygon_drawn(self, mode_type: InteractionMode, polygon: QPolygonF):
-        if mode_type == InteractionMode.DRAW_OBSTACLE: self.model.add_obstacle(polygon)
-        elif mode_type == InteractionMode.DEFINE_STAGING_AREA: self.model.add_staging_area(polygon)
+        if mode_type == InteractionMode.DRAW_OBSTACLE:
+            self.model.add_obstacle(polygon)
+        elif mode_type == InteractionMode.DEFINE_STAGING_AREA:
+            self.model.add_staging_area(polygon)
+        elif mode_type == InteractionMode.DEFINE_PATHFINDING_BOUNDS: # <<< HANDLE NEW MODE
+            self.model.set_user_pathfinding_bounds(polygon)
         # Model changes will trigger PdfViewer redraw via _handle_layout_or_points_changed_in_model
 
     @Slot(PointType, QPointF)
@@ -607,9 +631,37 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         path_pts, dist = self.pathfinding_service.get_shortest_path(self.model, start_n, end_n)
         self.pdf_viewer.draw_path(path_pts)
-        if path_pts and dist is not None: self.statusBar().showMessage(f"Path: {dist:.2f} {self.model.display_unit}.", 5000)
-        elif path_pts is None: QMessageBox.information(self, "No Path", f"No path: {start_n} to {end_n}."); self.statusBar().showMessage("No path found.", 5000)
-        else: QMessageBox.warning(self, "Error", "Path found, but distance error."); self.statusBar().showMessage("Path found, distance error.", 5000)
+
+        if path_pts and dist is not None:
+            self.statusBar().showMessage(f"Path: {dist:.2f} {self.model.display_unit}.", 5000)
+            
+            # --- DEBUG GRID VISUALIZATION FOR THIS SPECIFIC PATH ---
+            # if self.model.pathfinding_grid is not None and self.model.grid_resolution_factor > 0:
+            #     problem_path_cells = []
+            #     res_f = self.model.grid_resolution_factor
+            #     gh, gw = self.model.pathfinding_grid.shape
+            #     for p_pdf in path_pts: # Iterate over PDF coordinate points
+            #         # Convert PDF coordinate back to grid cell coordinate
+            #         col = max(0, min(int(p_pdf.x() / res_f), gw - 1))
+            #         row = max(0, min(int(p_pdf.y() / res_f), gh - 1))
+            #         problem_path_cells.append((row, col))
+                
+            #     if problem_path_cells: # Only save if path exists
+            #         print(f"[MainWindow Debug] Saving grid with path for {start_n} to {end_n}")
+            #         try:
+            #             self.pathfinding_service.save_grid_for_debug(
+            #                 self.model,
+            #                 f"debug_grid_path_{start_n}_to_{end_n}.png",
+            #                 path_cells_to_draw=problem_path_cells
+            #             )
+            #         except Exception as e:
+            #             print(f"[MainWindow Debug] Error saving grid image with path: {e}")
+            # --- END DEBUG ---
+
+        elif path_pts is None:
+            QMessageBox.information(self, "No Path", f"No path: {start_n} to {end_n}."); self.statusBar().showMessage("No path found.", 5000)
+        else: 
+            QMessageBox.warning(self, "Error", "Path found, but distance error."); self.statusBar().showMessage("Path found, distance error.", 5000)
 
     def _trigger_picklist_analysis(self):
         # ... (Logic remains similar, calls self.analysis_service.load_and_analyze) ...
@@ -722,6 +774,18 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Precomputation Error", error_message)
             self.statusBar().showMessage("Precomputation failed.", 5000)
         
+        # --- DEBUG GRID VISUALIZATION ---        
+        #if self.model.pathfinding_grid is not None:
+        #    print("[MainWindow Debug] Saving grid image after precomputation...")
+        #    try:
+        #        self.pathfinding_service.save_grid_for_debug(
+        #            self.model, 
+        #            "debug_grid_after_precompute.png"
+        #        )
+        #    except Exception as e:
+        #        print(f"[MainWindow Debug] Error saving grid image: {e}")
+        # --- END DEBUG ---        
+
         # Crucially, update UI states as precomputation affects what can be done next
         self._update_all_ui_states()       
 
@@ -914,7 +978,8 @@ class MainWindow(QMainWindow):
         # Optional: Print current time only once per few ticks to reduce spam
         if not hasattr(self, '_anim_tick_count'):
             self._anim_tick_count = 0
-        self._anim_tick_count = (self._anim_tick_count + 1) % 200 # Reset every 200 ticks (approx 10 seconds at 20fps)
+        # Increase interval for status print (e.g., every 500 ticks instead of 200)
+        self._anim_tick_count = (self._anim_tick_count + 1) % 500
         
         if self._anim_tick_count == 1: # Print status periodically
             print(f"[ANIM TICK STATUS] Global Time: {current_time_s:.2f}s. "
@@ -923,7 +988,8 @@ class MainWindow(QMainWindow):
                   f"Mode: {self._animation_mode_current.value}. "
                   f"Date Filter: '{self._animation_selected_date_filter}'")
             if self.model.scale_pixels_per_unit:
-                print(f"    Scale is: {self.model.scale_pixels_per_unit:.2f} px/{self.model.calibration_unit}")
+                 pass # No need to print scale every time unless debugging scale issues
+                 # print(f"    Scale is: {self.model.scale_pixels_per_unit:.2f} px/{self.model.calibration_unit}")
             else:
                 print(f"    WARNING: Scale is NOT SET (model.scale_pixels_per_unit is None). Carts may not display correctly.")
 
@@ -975,9 +1041,7 @@ class MainWindow(QMainWindow):
                     cart_width_px = self.model.animation_cart_width * scale_px_per_unit
                     cart_length_px = self.model.animation_cart_length * scale_px_per_unit
 
-                    if self._anim_tick_count == 1 and len(active_items_for_frame) < 2 :
-                        print(f"  [CARTS Adding] Item '{item_id}': Prog: {progress:.2f}. Pos: ({pos.x():.1f},{pos.y():.1f}). SizePx: {cart_width_px:.1f}x{cart_length_px:.1f}")
-
+                   
                     if cart_width_px > 0.1 and cart_length_px > 0.1 :
                         active_items_for_frame.append({
                             'pos': pos, 'angle': angle,
@@ -999,18 +1063,12 @@ class MainWindow(QMainWindow):
                             alpha=int(255*(1.0-max(0.0,min(1.0,fade_p))))
                 
                 if is_visible_this_tick and alpha > 0 and len(path_points) > 1:
-                    if self._anim_tick_count == 1 and len(active_items_for_frame) < 2 :
-                        print(f"  [PATHLINES Adding] Item '{item_id}': DrawProg: {draw_progress:.2f}. Alpha: {alpha}. Cluster: {start_cluster}")
+
                     active_items_for_frame.append({
                         'id': item_id, 'points': path_points, 'draw_progress': draw_progress,
                         'alpha': alpha, 'start_cluster': start_cluster
                     })
         
-        if self._anim_tick_count == 1 :
-           if active_items_for_frame:
-               print(f"[MainWindow _update_animation_frame] Sending {len(active_items_for_frame)} items to viewer. First item example: {active_items_for_frame[0]}")
-           else:
-               print(f"[MainWindow _update_animation_frame] No active items to draw at global time {current_time_s:.2f}s (filter: {self._animation_selected_date_filter})")
         
         self.pdf_viewer.update_animation_overlay(self._animation_mode_current, active_items_for_frame)
         self.pdf_viewer.viewport().update()
@@ -1022,10 +1080,32 @@ class MainWindow(QMainWindow):
 
     def _update_comboboxes(self):
         start_t, end_t = self.start_combo.currentText(), self.end_combo.currentText()
-        self.start_combo.clear(); self.start_combo.addItems(sorted(self.model.pick_aisles.keys()))
-        self.end_combo.clear(); self.end_combo.addItems(sorted(self.model.staging_locations.keys()))
-        self.start_combo.setCurrentText(start_t) if start_t in self.model.pick_aisles else self.start_combo.setPlaceholderText("Select Start...")
-        self.end_combo.setCurrentText(end_t) if end_t in self.model.staging_locations else self.end_combo.setPlaceholderText("Select End...")
+
+        # Get keys and sort them using the natural_sort_key
+        pick_aisle_names = sorted(list(self.model.pick_aisles.keys()), key=natural_sort_key)
+        staging_location_names = sorted(list(self.model.staging_locations.keys()), key=natural_sort_key)
+
+        self.start_combo.clear()
+        self.start_combo.addItems(pick_aisle_names)
+
+        self.end_combo.clear()
+        self.end_combo.addItems(staging_location_names)
+
+        # Restore previous selection if still valid
+        if start_t in self.model.pick_aisles:
+            self.start_combo.setCurrentText(start_t)
+        elif not pick_aisle_names: # If list is empty after sorting
+            self.start_combo.setPlaceholderText("No Pick Aisles")
+        elif self.start_combo.count() > 0 : # Default to first item if previous not found
+             self.start_combo.setCurrentIndex(0)
+
+
+        if end_t in self.model.staging_locations:
+            self.end_combo.setCurrentText(end_t)
+        elif not staging_location_names: # If list is empty
+            self.end_combo.setPlaceholderText("No Staging Locations")
+        elif self.end_combo.count() > 0: # Default to first item
+            self.end_combo.setCurrentIndex(0)
 
     def _update_action_states(self):
         pdf_ok, scale_ok, pts_ok, grid_ok = self.model.current_pdf_path is not None, self.model.is_scale_set, \
@@ -1035,6 +1115,7 @@ class MainWindow(QMainWindow):
         self.set_scale_action.setEnabled(pdf_ok); self.edit_mode_action.setEnabled(pdf_ok)
         for act in [self.draw_obstacle_action, self.define_staging_area_action, self.set_start_point_action,
                     self.set_end_point_action, self.define_aisle_line_action, self.define_staging_line_action]: act.setEnabled(scale_ok)
+        self.define_bounds_action.setEnabled(scale_ok) # <<< ENABLE/DISABLE BOUNDS ACTION        
         self.calculate_button.setEnabled(self.model.can_calculate_paths and grid_ok)
         self.precompute_paths_action.setEnabled(self.model.can_precompute) # Grid can be generated if needed
         self.analyze_picklist_action.setEnabled(self.model.can_analyze_or_animate)

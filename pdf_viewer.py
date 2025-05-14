@@ -10,18 +10,18 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import (
     QPixmap, QImage, QPen, QCursor, QBrush, QColor, QKeyEvent, QFont,
     QPainterPath, QTransform, QMouseEvent, QWheelEvent,
-    QPolygonF # <<< ENSURE QPolygonF is here (or move from QtCore if it was put there)
+    QPolygonF
 )
 from PySide6.QtCore import (
     Qt, Signal, QRectF, QSize, QEvent,
-    QPointF, QLineF # QPolygonF removed from here if it was added
+    QPointF, QLineF
 )
 
 # Assuming enums.py is in the same directory or accessible in PYTHONPATH
 from enums import InteractionMode, PointType, AnimationMode
 
 # --- CORRECTED IMPORT HERE ---
-from typing import Optional, List, Dict, Tuple, Any # Added Any
+from typing import Optional, List, Dict, Tuple, Any
 
 
 # Configuration
@@ -36,7 +36,10 @@ PATH_Z_VALUE = 15
 OBSTACLES_Z_VALUE = 10
 STAGING_AREAS_Z_VALUE = 9
 PDF_Z_VALUE = 0
+BOUNDS_Z_VALUE = 8 # Below staging areas but above PDF
 
+# Set this to True if you need detailed per-frame logs again temporarily
+DEBUG_ANIMATION_VERBOSE = False
 
 class PdfViewer(QGraphicsView):
     # --- Signals for User Interactions and State Changes ---
@@ -68,6 +71,7 @@ class PdfViewer(QGraphicsView):
         self._temp_line_item: Optional[QGraphicsLineItem] = None
         self._temp_polygon_item: Optional[QGraphicsPolygonItem] = None
 
+        self._pathfinding_bounds_item: Optional[QGraphicsPolygonItem] = None # Item to display bounds
         self._obstacle_items: List[QGraphicsPolygonItem] = []
         self._staging_area_items: List[QGraphicsPolygonItem] = []
         self._start_point_items: Dict[str, Tuple[QGraphicsEllipseItem, QGraphicsSimpleTextItem]] = {}
@@ -93,6 +97,12 @@ class PdfViewer(QGraphicsView):
         self._staging_area_brush = QBrush(QColor(0, 0, 255, STAGING_AREA_ALPHA))
         self._staging_area_preview_pen = QPen(QColor(0, 150, 150), 1, Qt.PenStyle.DashLine); self._staging_area_preview_pen.setCosmetic(True)
 
+        self._bounds_pen = QPen(QColor(128, 0, 128), 3, Qt.PenStyle.SolidLine) # Bold Purple
+        self._bounds_pen.setCosmetic(True)
+        self._bounds_brush = QBrush(Qt.GlobalColor.transparent) # Transparent fill
+        self._bounds_preview_pen = QPen(QColor(128, 0, 128), 2, Qt.PenStyle.DashLine) # Dashed Purple preview
+        self._bounds_preview_pen.setCosmetic(True)        
+
         self._line_def_pen = QPen(Qt.GlobalColor.magenta, 1, Qt.PenStyle.DashLine); self._line_def_pen.setCosmetic(True)
         self._scale_line_pen = QPen(Qt.GlobalColor.red, 1, Qt.PenStyle.DashLine); self._scale_line_pen.setCosmetic(True)
 
@@ -112,6 +122,7 @@ class PdfViewer(QGraphicsView):
         self.clear_obstacles()
         self.clear_staging_areas()
         self.clear_all_points()
+        self.clear_pathfinding_bounds_item()
         self.clear_path()
         self.clear_animation_overlay()
         self._reset_temp_drawing_items()
@@ -246,6 +257,9 @@ class PdfViewer(QGraphicsView):
             self.set_edit_mode_flags(True)
         elif mode == InteractionMode.PANNING:
             cursor_shape = Qt.CursorShape.ClosedHandCursor
+        elif mode == InteractionMode.DEFINE_PATHFINDING_BOUNDS: 
+            cursor_shape = Qt.CursorShape.PointingHandCursor
+            self.status_update.emit("Define Pathfinding Bounds: Click points to draw polygon. Click near start to close.", 0)
         
         if mode != InteractionMode.EDIT: # Reset drag mode if not entering edit mode
              self.setDragMode(QGraphicsView.DragMode.NoDrag)
@@ -315,6 +329,7 @@ class PdfViewer(QGraphicsView):
             InteractionMode.SET_SCALE_END: lambda: self._finish_line_draw(scene_pos, self.scale_line_drawn.emit),
             InteractionMode.DRAW_OBSTACLE: lambda: self._handle_polygon_point(scene_pos, InteractionMode.DRAW_OBSTACLE, self._obstacle_brush, self._obstacle_preview_pen),
             InteractionMode.DEFINE_STAGING_AREA: lambda: self._handle_polygon_point(scene_pos, InteractionMode.DEFINE_STAGING_AREA, self._staging_area_brush, self._staging_area_preview_pen),
+            InteractionMode.DEFINE_PATHFINDING_BOUNDS: lambda: self._handle_polygon_point(scene_pos, InteractionMode.DEFINE_PATHFINDING_BOUNDS, self._bounds_brush, self._bounds_preview_pen),            
             InteractionMode.SET_START_POINT: lambda: self._request_point_placement(PointType.PICK_AISLE, scene_pos),
             InteractionMode.SET_END_POINT: lambda: self._request_point_placement(PointType.STAGING_LOCATION, scene_pos),
             InteractionMode.DEFINE_AISLE_LINE_START: lambda: self._start_line_draw(scene_pos, InteractionMode.DEFINE_AISLE_LINE_END, self._line_def_pen),
@@ -357,10 +372,18 @@ class PdfViewer(QGraphicsView):
         if len(self._temp_drawing_points) > 2:
             if QLineF(scene_pos, self._temp_drawing_points[0]).length() < OBSTACLE_SNAP_DISTANCE:
                 is_closing = True; scene_pos = self._temp_drawing_points[0]
+        status_msg_base = mode_type.name.replace('_', ' ').replace("DEFINE ", "").title()        
+        
         if is_closing:
             self.polygon_drawn.emit(mode_type, QPolygonF(self._temp_drawing_points))
             self._reset_temp_drawing_items()
             self.status_update.emit(f"{mode_type.name.replace('_', ' ')} polygon completed. Draw another or cancel.", 0)
+            # Reset mode to IDLE after finishing bounds drawing
+            if mode_type == InteractionMode.DEFINE_PATHFINDING_BOUNDS:
+                 self.set_mode(InteractionMode.IDLE)
+                 self.status_update.emit(f"{status_msg_base} defined.", 3000)
+            else:
+                 self.status_update.emit(f"{status_msg_base} polygon completed. Draw another or cancel.", 0)
         else:
             self._temp_drawing_points.append(scene_pos); n = len(self._temp_drawing_points)
             if n == 1:
@@ -444,6 +467,24 @@ class PdfViewer(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor) 
         self.view_changed.emit(); event.accept()
 
+    # --- Public Methods to Add/Remove/Update Graphics ---
+
+    def draw_pathfinding_bounds_item(self, polygon: QPolygonF):
+        """Draws or updates the visual representation of the pathfinding bounds."""
+        self.clear_pathfinding_bounds_item() # Clear previous one if exists
+        if polygon and not polygon.isEmpty():
+            self._pathfinding_bounds_item = QGraphicsPolygonItem(polygon)
+            self._pathfinding_bounds_item.setPen(self._bounds_pen)
+            self._pathfinding_bounds_item.setBrush(self._bounds_brush)
+            self._pathfinding_bounds_item.setZValue(BOUNDS_Z_VALUE)
+            self.scene().addItem(self._pathfinding_bounds_item)
+
+    def clear_pathfinding_bounds_item(self):
+        """Removes the visual pathfinding bounds item from the scene."""
+        if self._pathfinding_bounds_item and self._pathfinding_bounds_item.scene():
+            self.scene().removeItem(self._pathfinding_bounds_item)
+        self._pathfinding_bounds_item = None    
+    
     # Public Methods to Add/Remove/Update Graphics
     def add_obstacle_item(self, polygon: QPolygonF) -> QGraphicsPolygonItem:
         item = QGraphicsPolygonItem(polygon)
@@ -576,14 +617,10 @@ class PdfViewer(QGraphicsView):
     def _draw_animation_carts(self, active_carts_data: list):
         if not self.animation_overlay_group: return
         if not active_carts_data: return # Added check
-
-        print(f"[PdfViewer _draw_animation_carts] Attempting to draw {len(active_carts_data)} carts.")
+        
         for i, cart_data in enumerate(active_carts_data):
             pos, angle, width_px, length_px = cart_data['pos'], cart_data['angle'], cart_data['width'], cart_data['length']
             
-            if i < 2: # Print for first few carts
-               print(f"  Drawing cart {i}: Pos({pos.x():.1f},{pos.y():.1f}), Angle({angle:.1f}), SizePx({width_px:.1f}x{length_px:.1f})")
-
             if width_px <= 0.1 or length_px <= 0.1: # More lenient for small scales
                 if i < 2: print(f"  Skipping cart {i} due to zero/small size.")
                 continue
@@ -592,7 +629,6 @@ class PdfViewer(QGraphicsView):
             cart_rect.setBrush(QColor(255, 100, 0, 180)); cart_rect.setPen(Qt.PenStyle.NoPen)
             cart_rect.setTransform(QTransform().translate(pos.x(), pos.y()).rotate(angle))
             self.animation_overlay_group.addToGroup(cart_rect)
-        if active_carts_data: print(f"  Added {self.animation_overlay_group.childItems()} items to group for carts.")
 
 
     def _draw_animation_paths(self, active_paths_data: list):
@@ -604,16 +640,13 @@ class PdfViewer(QGraphicsView):
         cluster_colors = [QColor("blue"), QColor("red"), QColor("darkGreen"), QColor("purple"), QColor("orange"), QColor("teal"), QColor("maroon"), QColor("navy"), QColor("olive"), QColor("deeppink")]
 
 
-        print(f"[PdfViewer _draw_animation_paths] Attempting to draw {len(active_paths_data)} paths.")
         for i, path_data in enumerate(active_paths_data):
             points, draw_prog, alpha, cluster = path_data['points'], path_data['draw_progress'], path_data['alpha'], path_data.get('start_cluster', "default")
-            
-            if i < 2:
-                print(f"  Drawing path {i} for cluster '{cluster}': Prog({draw_prog:.2f}), Alpha({alpha}), Points({len(points)})")
 
             if not points or len(points) < 2 or alpha <= 0:
                 if i < 2: print(f"  Skipping path {i} due to no points/alpha.")
                 continue
+
             # ... (rest of path drawing logic) ...
             if cluster not in self._cluster_color_map: self._cluster_color_map[cluster] = cluster_colors[len(self._cluster_color_map) % len(cluster_colors)]
             path_color = self._cluster_color_map[cluster]
@@ -631,6 +664,6 @@ class PdfViewer(QGraphicsView):
             color_with_alpha = QColor(path_color); color_with_alpha.setAlpha(alpha)
             pen = QPen(color_with_alpha, 2); pen.setCosmetic(True); path_item.setPen(pen)
             self.animation_overlay_group.addToGroup(path_item)
-        if active_paths_data: print(f"  Added {self.animation_overlay_group.childItems()} items to group for paths.")
+        
 
 # --- END OF FILE Warehouse-Path-Finder-main/pdf_viewer.py ---
